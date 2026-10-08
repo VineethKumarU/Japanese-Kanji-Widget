@@ -124,7 +124,7 @@ select{border:1px solid var(--border);background:var(--chip);color:var(--text);b
   </div>
   <input type="range" id="slider" min="1" max="1" value="1" aria-label="Position in list">
   <div class="jump">
-    <input id="jump" placeholder="Go to # or type a kanji" autocomplete="off" autocapitalize="off">
+    <input id="jump" placeholder="Go to # or type a kanji" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go">
     <button id="go">Go</button>
   </div>
   <p id="jumpmsg"></p>
@@ -2382,6 +2382,17 @@ function mark(s){
   }
 }
 
+// Mobile browsers (especially iOS Safari) have two well-known Web Speech bugs:
+// 1) getVoices() is often empty until the async 'voiceschanged' event fires.
+// 2) an utterance can be garbage-collected mid-speech if nothing keeps a
+//    reference to it, which silently cuts off or skips the audio.
+// spokenUtterance (below) exists only to hold that reference.
+let voicesReady = false, spokenUtterance = null;
+function primeVoices(){
+  if(!('speechSynthesis' in window)) return;
+  if(speechSynthesis.getVoices().length){ voicesReady = true; return; }
+  speechSynthesis.onvoiceschanged = () => { voicesReady = true; };
+}
 function jaVoice(){
   try{ return speechSynthesis.getVoices().find(v => /^ja/i.test(v.lang)) || null; }catch(e){ return null; }
 }
@@ -2389,17 +2400,32 @@ function speak(){
   if(!cur) return;
   if(!('speechSynthesis' in window)){ msg('Speech is not supported in this browser.'); return; }
   try{
+    if(!voicesReady && !speechSynthesis.getVoices().length){
+      // Voices haven't loaded yet (common on the very first tap). Retry
+      // once they arrive instead of speaking with no voice at all.
+      msg('Loading voice…');
+      speechSynthesis.onvoiceschanged = () => { voicesReady = true; speak(); };
+      return;
+    }
+    speechSynthesis.resume();
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(cur[3]);
+    spokenUtterance = u; // keep a live reference so it can't be garbage-collected mid-speech
     u.lang = 'ja-JP'; u.rate = 0.85;
     const v = jaVoice();
     if(v) u.voice = v;
-    else if(speechSynthesis.getVoices().length) msg("No Japanese voice found - add one in your device's text-to-speech settings.");
+    else msg("No Japanese voice found - add one in your device's text-to-speech settings.");
+    u.onerror = () => msg('Could not play audio on this device.');
+    u.onstart = () => { if(!v) msg("No Japanese voice found - add one in your device's text-to-speech settings."); else msg(''); };
     speechSynthesis.speak(u);
-  }catch(e){ msg('Could not play audio.'); }
+  }catch(e){ msg('Could not play audio: ' + e.message); }
 }
 
 function jump(){
+  try{ jumpImpl(); }
+  catch(e){ msg('Something went wrong: ' + e.message); }
+}
+function jumpImpl(){
   const q = jumpEl.value.trim();
   if(!q) return;
   if(/^\d+$/.test(q)){
@@ -2493,6 +2519,10 @@ document.addEventListener('keydown', e => {
   else if(e.key==='s') speak();
   else if(e.key===' ' && t!=='BUTTON'){ e.preventDefault(); reveal(); }
 });
+
+document.querySelectorAll('button').forEach(b => { b.type = 'button'; });
+primeVoices();
+window.addEventListener('error', e => msg('Error: ' + e.message + ' (tell Claude this message so it can be fixed)'));
 
 applyMode();
 render();
